@@ -1,0 +1,155 @@
+<!DOCTYPE html>
+<html lang="it">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Clima dei locali</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;600;800&display=swap" rel="stylesheet">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js"></script>
+<style>
+:root{--bg:#eef1f4;--card:#fff;--ink:#14202b;--mute:#5d6b78;--line:#d5dce3;
+--t:#d9482b;--h:#1f6fb5;--p:#2a8f6a;--c1:#d9482b;--c2:#1f6fb5;--c3:#2a8f6a;--c4:#8a5cc2}
+@media(prefers-color-scheme:dark){:root{--bg:#0f1720;--card:#17222d;--ink:#e8eef3;--mute:#93a3b2;--line:#2a3846;
+--t:#ff7a5c;--h:#5ea8ec;--p:#4fc79b;--c1:#ff7a5c;--c2:#5ea8ec;--c3:#4fc79b;--c4:#b98ef0}}
+*{box-sizing:border-box}
+html{padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px)}
+body{margin:0;background:var(--bg);color:var(--ink);font-family:Manrope,system-ui,-apple-system,"Segoe UI",sans-serif;line-height:1.45}
+main{max-width:1100px;margin:0 auto;padding:24px 16px 48px}
+header{display:flex;flex-wrap:wrap;justify-content:space-between;align-items:baseline;gap:8px;margin-bottom:20px}
+h1{font-size:1.6rem;font-weight:800;margin:0;letter-spacing:-.01em}
+#status{color:var(--mute);font-size:.9rem}
+.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:14px}
+.room{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:16px;border-top:5px solid var(--c)}
+.room h2{margin:0 0 2px;font-size:1.1rem}
+.when{color:var(--mute);font-size:.8rem;margin-bottom:12px}
+.when.old{color:var(--t)}
+.vals{display:grid;grid-template-columns:repeat(3,1fr);gap:6px}
+.v b{display:block;font-size:1.45rem;font-weight:800;white-space:nowrap}
+.v span{font-size:.78rem;color:var(--mute)}
+.v:nth-child(1) b{color:var(--t)}.v:nth-child(2) b{color:var(--h)}.v:nth-child(3) b{color:var(--p)}
+.chartbox{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:16px;margin-top:18px}
+.bar{display:flex;flex-wrap:wrap;gap:8px;justify-content:space-between;margin-bottom:12px}
+.seg{display:flex;gap:4px}
+button,select{font:inherit;font-size:.9rem;color:var(--ink);background:var(--bg);border:1px solid var(--line);border-radius:6px;padding:6px 12px;cursor:pointer}
+button[aria-pressed=true]{background:var(--ink);color:var(--card);border-color:var(--ink)}
+button:focus-visible,select:focus-visible{outline:2px solid var(--h);outline-offset:2px}
+.canvas{position:relative;height:340px}
+#err{color:var(--t);margin-top:14px;font-size:.9rem;white-space:pre-line}
+</style>
+</head>
+<body>
+<main>
+<header><h1>Clima dei locali</h1><div id="status">Caricamento…</div></header>
+<section class="grid" id="rooms" aria-label="Ultime misure"></section>
+<section class="chartbox">
+ <div class="bar">
+  <div class="seg" id="metrics"></div>
+  <select id="range" aria-label="Quante misure mostrare">
+   <option value="50">Ultime 50 misure</option>
+   <option value="200" selected>Ultime 200 misure</option>
+   <option value="500">Ultime 500 misure</option>
+   <option value="1000">Ultime 1000 misure</option>
+  </select>
+ </div>
+ <div class="canvas"><canvas id="chart" role="img" aria-label="Storico delle misure"></canvas></div>
+</section>
+<div id="err"></div>
+</main>
+
+<script>
+/* ====== CONFIGURAZIONE: modifica solo questa parte ====== */
+const DB_URL  = "https://IL-TUO-PROGETTO-default-rtdb.europe-west1.firebasedatabase.app"; // URL del Realtime Database
+const ROOMS   = [ // id = nome del nodo su Firebase, name = nome mostrato
+  {id:"locale1", name:"Locale 1"},
+  {id:"locale2", name:"Locale 2"},
+  {id:"locale3", name:"Locale 3"},
+  {id:"locale4", name:"Locale 4"},
+];
+const BASE_PATH = "sensori";           // percorso padre: /sensori/locale1, /sensori/locale2…
+const FIELDS = {t:"temperature", h:"humidity", p:"pressure", ts:"timestamp"}; // nomi dei campi nei dati
+const REFRESH_MS = 30000;              // aggiornamento automatico
+const STALE_MIN  = 15;                 // dopo quanti minuti senza dati segnalare "non aggiornato"
+/* ======================================================== */
+
+const METRICS = {
+  t:{label:"Temperatura", unit:"°C",  dec:1},
+  h:{label:"Umidità",     unit:"%",   dec:0},
+  p:{label:"Pressione",   unit:"hPa", dec:0},
+};
+const cssv = n => getComputedStyle(document.documentElement).getPropertyValue(n).trim();
+let metric = "t", data = {}, chart;
+
+function toMs(v){ v = Number(v); return v < 1e11 ? v*1000 : v; }   // accetta secondi o millisecondi
+function parse(raw){
+  if(!raw) return [];
+  const recs = raw[FIELDS.t] !== undefined ? [raw] : Object.keys(raw).sort().map(k => raw[k]);
+  return recs.filter(r => r && typeof r === "object").map((r,i) => ({
+    x: r[FIELDS.ts] != null ? toMs(r[FIELDS.ts]) : i,
+    t: num(r[FIELDS.t]), h: num(r[FIELDS.h]), p: num(r[FIELDS.p]),
+  })).sort((a,b) => a.x - b.x);
+}
+function num(v){ v = parseFloat(v); return Number.isFinite(v) ? v : null; }
+function fmtDate(ms){ return new Date(ms).toLocaleString("it-IT",{day:"2-digit",month:"2-digit",hour:"2-digit",minute:"2-digit"}); }
+
+async function load(){
+  const n = document.getElementById("range").value, errs = [];
+  await Promise.all(ROOMS.map(async r => {
+    try{
+      const url = `${DB_URL}/${BASE_PATH}/${r.id}.json?orderBy=%22$key%22&limitToLast=${n}`;
+      const res = await fetch(url);
+      if(!res.ok) throw new Error(`HTTP ${res.status}` + (res.status===401 ? " (regole di lettura non pubbliche)" : ""));
+      data[r.id] = parse(await res.json());
+    }catch(e){ errs.push(`${r.name}: ${e.message}`); data[r.id] = data[r.id] || []; }
+  }));
+  document.getElementById("err").textContent = errs.length ? "Errore di lettura da Firebase:\n" + errs.join("\n") : "";
+  document.getElementById("status").textContent = "Aggiornato alle " + new Date().toLocaleTimeString("it-IT",{hour:"2-digit",minute:"2-digit"});
+  drawRooms(); drawChart();
+}
+
+function drawRooms(){
+  document.getElementById("rooms").innerHTML = ROOMS.map((r,i) => {
+    const d = data[r.id] || [], last = d[d.length-1];
+    const val = k => last && last[k] != null ? last[k].toFixed(METRICS[k].dec) : "–";
+    const stale = last && last.x > 1e11 && (Date.now()-last.x) > STALE_MIN*60000;
+    const when = !last ? "Nessun dato" : last.x > 1e11 ? (stale ? "Non aggiornato · " : "Ultima misura: ") + fmtDate(last.x) : "";
+    return `<article class="room" style="--c:var(--c${i+1})"><h2>${r.name}</h2><div class="when ${stale?"old":""}">${when}</div>
+      <div class="vals">${Object.keys(METRICS).map(k => `<div class="v"><b>${val(k)}<small> ${last&&last[k]!=null?METRICS[k].unit:""}</small></b><span>${METRICS[k].label}</span></div>`).join("")}</div></article>`;
+  }).join("");
+}
+
+function drawChart(){
+  const m = METRICS[metric], ink = cssv("--mute"), grid = cssv("--line");
+  const datasets = ROOMS.map((r,i) => ({
+    label:r.name, borderColor:cssv(`--c${i+1}`), backgroundColor:cssv(`--c${i+1}`),
+    borderWidth:2, pointRadius:0, pointHoverRadius:4, tension:.25, spanGaps:true,
+    data:(data[r.id]||[]).filter(p => p[metric] != null).map(p => ({x:p.x, y:p[metric]})),
+  }));
+  const cfg = {type:"line", data:{datasets}, options:{
+    responsive:true, maintainAspectRatio:false, animation:false, parsing:false,
+    interaction:{mode:"nearest", axis:"x", intersect:false},
+    plugins:{legend:{labels:{color:ink,usePointStyle:true,boxWidth:8}},
+      tooltip:{callbacks:{title:i => i[0].parsed.x > 1e11 ? fmtDate(i[0].parsed.x) : "Misura " + i[0].parsed.x,
+                          label:c => `${c.dataset.label}: ${c.parsed.y.toFixed(m.dec+1)} ${m.unit}`}}},
+    scales:{
+      x:{type:"linear", grid:{color:grid}, ticks:{color:ink, maxTicksLimit:7, callback:v => v > 1e11 ? fmtDate(v) : v}},
+      y:{grid:{color:grid}, ticks:{color:ink}, title:{display:true, text:`${m.label} (${m.unit})`, color:ink}},
+    }}};
+  if(chart) chart.destroy();
+  chart = new Chart(document.getElementById("chart"), cfg);
+}
+
+document.getElementById("metrics").innerHTML = Object.keys(METRICS).map(k =>
+  `<button data-k="${k}" aria-pressed="${k===metric}">${METRICS[k].label}</button>`).join("");
+document.getElementById("metrics").addEventListener("click", e => {
+  const k = e.target.dataset.k; if(!k) return;
+  metric = k;
+  document.querySelectorAll("#metrics button").forEach(b => b.setAttribute("aria-pressed", b.dataset.k === k));
+  drawChart();
+});
+document.getElementById("range").addEventListener("change", load);
+matchMedia("(prefers-color-scheme: dark)").addEventListener("change", () => { drawRooms(); drawChart(); });
+load(); setInterval(load, REFRESH_MS);
+</script>
+</body>
+</html>
